@@ -1,0 +1,45 @@
+@import "xterm/css/xterm.css";
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+.no-scrollbar::-webkit-scrollbar {
+    display: none;
+}
+
+.h-content {
+    height: calc(100% - 36px);
+}
+
+.h-sub {
+    height: calc(100vh - 140px);
+}
+
+/* Light mode scrollbar */
+.scrollbar-light {
+    scrollbar-color: var(--color-gray-400) var(--color-green-50); /* Firefox */
+}
+
+.scrollbar-light::-webkit-scrollbar-track {
+    background: var(--color-green-50);
+}
+
+.scrollbar-light::-webkit-scrollbar-thumb:hover {
+    background: var(--color-gray-700);
+}
+
+/* Dark mode scrollbar */
+.scrollbar-dark {
+    scrollbar-color: var(--color-gray-600) var(--color-gray-900); /* Firefox */
+}
+
+.scrollbar-dark::-webkit-scrollbar-track {
+    background: var(--color-gray-900);
+}
+
+.scrollbar-dark::-webkit-scrollbar-thumb:hover {
+    background: var(--color-gray-300);
+}
+
+button:hover{
+    cursor: pointer;
+}

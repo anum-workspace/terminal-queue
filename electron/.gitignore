@@ -1,0 +1,15 @@
+node_modules/
+dist/
+build/
+release/
+
+# Native rebuild cache
+.npm/
+.node-gyp/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

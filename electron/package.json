@@ -1,0 +1,82 @@
+{
+    "name": "terminal-queue",
+    "private": true,
+    "version": "1.0.0",
+    "description": "Terminal Queue - a terminal management system.",
+    "license": "MIT",
+    "type": "commonjs",
+    "main": "main.js",
+    "scripts": {
+        "start": "electron .",
+        "electron:pack": "electron-builder --dir",
+        "electron:build": "electron-builder"
+    },
+    "build": {
+        "appId": "org.anumhosen.terminalqueue",
+        "icon": "assets/icon.png",
+        "productName": "Terminal Queue",
+        "copyright": "Copyright © 2026 Anum Hosen",
+        "directories": {
+            "output": "release"
+        },
+        "files": [
+            "dist/**/*",
+            "main.js",
+            "preload.js"
+        ],
+        "win": {
+            "target": [
+                "nsis"
+            ],
+            "icon": "build/icon.ico"
+        },
+        "nsis": {
+            "oneClick": false,
+            "allowToChangeInstallationDirectory": true,
+            "createDesktopShortcut": true,
+            "createStartMenuShortcut": true,
+            "shortcutName": "Terminal Queue"
+        },
+        "linux": {
+            "target": [
+                "deb",
+                "AppImage"
+            ],
+            "category": "Utility",
+            "icon": "build/icons/128x128.png"
+        },
+        "extraResources": [
+            {
+                "from": "assets",
+                "to": "assets",
+                "filter": [
+                    "**/*"
+                ]
+            }
+        ]
+    },
+    "repository": "https://github.com/anumhosen/terminal-queue/",
+    "keywords": [
+        "Electron",
+        "Terminal Queue",
+        "Terminal",
+        "Simulation",
+        "Research"
+    ],
+    "author": {
+        "name": "Anum Hosen",
+        "email": "anumhosen@gmail.com"
+    },
+    "dependencies": {
+        "auto-launch": "^5.0.6",
+        "electron-log": "^5.2.0",
+        "electron-store": "^8.2.0",
+        "node-pty": "^1.0.0",
+        "sqlite3": "^5.0.2",
+        "tree-kill": "^1.2.2"
+    },
+    "devDependencies": {
+        "electron": "^30.5.1",
+        "electron-builder": "^26.8.1"
+    }
+}
