@@ -43,7 +43,7 @@
                 "AppImage"
             ],
             "category": "Utility",
-            "icon": "build/icons/128x128.png"
+            "icon": "build/icons/256x256.png"
         },
         "extraResources": [
             {

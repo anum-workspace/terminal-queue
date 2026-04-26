@@ -40,7 +40,7 @@ export default function TerminalPanel() {
                 }
             }
 
-            console.log(`Creating terminal for tab ${tabId}`);
+            // console.log(`Creating terminal for tab ${tabId}`);
 
             // Create new terminal instance
             const term = new Terminal({
@@ -97,7 +97,7 @@ export default function TerminalPanel() {
 
             // Create PTY process with proper directory
             try {
-                console.log(`Creating PTY for tab ${tabId} in directory: ${cwd}`);
+                // console.log(`Creating PTY for tab ${tabId} in directory: ${cwd}`);
                 await window.api.terminalCreate({
                     tabId,
                     cols: term.cols,
@@ -243,7 +243,7 @@ export default function TerminalPanel() {
                             }`}
                         >
                             <VscTerminal className="text-green-400" size={12} />
-                            <span className="truncate max-w-[120px]">{tab.title}</span>
+                            <span className="truncate max-w-30">{tab.title}</span>
                             {tabs.length > 1 && (
                                 <button
                                     onClick={(e) => handleRemoveTab(tab.id, e)}

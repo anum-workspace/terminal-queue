@@ -328,16 +328,19 @@ export default function Startup() {
                         {/* Managed Command Dropdown */}
                         <div>
                             <label className="text-xs text-gray-500 block mb-1">
-                                Select from saved
+                                Load from saved
                             </label>
                             <select
                                 onChange={handleManagedSelect}
-                                className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm text-gray-200"
+                                className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1.5 text-sm text-gray-200 focus:outline-none focus:border-blue-500/50"
                             >
-                                <option value="">Choose command</option>
+                                <option value="">Choose a saved command...</option>
                                 {managedCommands.map((c) => (
                                     <option key={c.id} value={c.id}>
-                                        {c.command.substring(0, 50)}
+                                        {c.title || "Untitled"} - {c.command.substring(0, 30)}
+                                        {c.group_name !== "All Commands"
+                                            ? ` [${c.group_name}]`
+                                            : ""}
                                     </option>
                                 ))}
                             </select>

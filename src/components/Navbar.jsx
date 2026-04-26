@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import {
     VscChromeMinimize,
     VscChromeMaximize,
@@ -7,29 +7,25 @@ import {
     VscTerminal,
     VscClearAll,
     VscPlay,
-    VscDebugStop
+    VscDebugStop,
 } from "react-icons/vsc";
 import { useQueueStore } from "../stores/queueStore";
-import { useHistoryStore } from "../stores/historyStore";
 
 export default function Navbar() {
     const [maximized, setMaximized] = useState(false);
     const [focused, setFocused] = useState(true);
     const [isRunningQueue, setIsRunningQueue] = useState(false);
+    const isRunningRef = useRef(false); // Use ref to avoid stale closures
 
     const { clearAll, fetch: fetchQueue } = useQueueStore();
-    const { fetch: fetchHistory } = useHistoryStore();
 
     useEffect(() => {
-        // Check initial maximize state
         window.api.isMaximized().then(setMaximized);
 
-        // Listen for maximize changes
         window.api.onMaximizeChange((isMaximized) => {
             setMaximized(isMaximized);
         });
 
-        // Listen for focus changes
         if (window.api.onFocusChange) {
             window.api.onFocusChange((isFocused) => {
                 setFocused(isFocused);
@@ -37,51 +33,62 @@ export default function Navbar() {
         }
 
         // Listen for queue execution events
-        if (window.api.onQueueExecutionStarted) {
-            window.api.onQueueExecutionStarted(() => {
-                setIsRunningQueue(true);
-            });
-        }
+        const cleanupStarted = window.api.onQueueExecutionStarted?.((data) => {
+            console.log("Queue execution started:", data);
+            setIsRunningQueue(true);
+            isRunningRef.current = true;
+        });
 
-        if (window.api.onQueueExecutionCompleted) {
-            window.api.onQueueExecutionCompleted(() => {
-                setIsRunningQueue(false);
-                // Refresh both queue and history after execution
-                fetchQueue();
-                fetchHistory();
-            });
-        }
+        const cleanupCompleted = window.api.onQueueExecutionCompleted?.((result) => {
+            console.log("Queue execution completed:", result);
+            setIsRunningQueue(false);
+            isRunningRef.current = false;
+            // Refresh queue after completion
+            fetchQueue();
+        });
+
+        return () => {
+            cleanupStarted?.();
+            cleanupCompleted?.();
+        };
     }, []);
 
     const handleClearQueue = async () => {
         try {
             await clearAll();
-            // Optionally show a notification
-            console.log("Queue cleared");
         } catch (error) {
             console.error("Failed to clear queue:", error);
         }
     };
 
     const handleRunQueue = async () => {
+        if (isRunningRef.current) return;
+
         try {
             setIsRunningQueue(true);
+            isRunningRef.current = true;
 
-            // Listen for queue completion
-            window.api.onQueueExecutionCompleted(async (result) => {
-                console.log("Queue execution completed:", result);
-                setIsRunningQueue(false);
+            console.log("Starting queue execution...");
+            const result = await window.api.runQueue();
+            console.log("Queue execution result:", result);
 
-                // Refresh stores
-                await fetchQueue();
-                await fetchHistory();
-            });
-
-            // Start queue execution
-            await window.api.runQueue();
+            setIsRunningQueue(false);
+            isRunningRef.current = false;
+            await fetchQueue();
         } catch (error) {
             console.error("Failed to run queue:", error);
             setIsRunningQueue(false);
+            isRunningRef.current = false;
+        }
+    };
+
+    const handleStopQueue = async () => {
+        try {
+            console.log("Stopping queue execution...");
+            await window.api.stopQueueExecution();
+            // State will be updated via events
+        } catch (error) {
+            console.error("Failed to stop queue:", error);
         }
     };
 
@@ -103,31 +110,29 @@ export default function Navbar() {
             <div className="flex items-center gap-3" style={{ WebkitAppRegion: "no-drag" }}>
                 <VscTerminal className="text-green-400 text-lg" />
                 <span className="text-sm font-medium tracking-wide">TerminalQueue</span>
+                {isRunningQueue && (
+                    <span className="text-xs text-yellow-400 animate-pulse">● Running</span>
+                )}
             </div>
 
             <div className="flex items-center gap-2 text-sm" style={{ WebkitAppRegion: "no-drag" }}>
-                {/* Clear Queue Button */}
-                <button
-                    onClick={handleClearQueue}
-                    className="flex items-center gap-1 hover:bg-red-700/30 px-2 py-1 rounded transition text-xs text-gray-300 hover:text-red-200"
-                    title="Clear all queued commands"
-                >
-                    <VscClearAll size={14} />
-                    Clear Queue
-                </button>
+                {/* Clear Queue Button (hidden during execution) */}
+                {!isRunningQueue && (
+                    <button
+                        onClick={handleClearQueue}
+                        className="flex items-center gap-1 hover:bg-red-700/30 px-2 py-1 rounded transition text-xs text-gray-300 hover:text-red-200"
+                        title="Clear all queued commands"
+                    >
+                        <VscClearAll size={14} />
+                        Clear Queue
+                    </button>
+                )}
 
                 {/* Run Queue / Stop Queue Button */}
                 {isRunningQueue ? (
                     <button
-                        onClick={async () => {
-                            try {
-                                await window.api.stopQueueExecution();
-                                setIsRunningQueue(false);
-                            } catch (error) {
-                                console.error("Failed to stop queue:", error);
-                            }
-                        }}
-                        className="flex items-center gap-1 px-2 py-1 rounded transition text-xs bg-red-700/50 hover:bg-red-600/50 text-red-200"
+                        onClick={handleStopQueue}
+                        className="flex items-center gap-1 px-2 py-1 rounded transition text-xs bg-red-700/50 hover:bg-red-600/50 text-red-200 animate-pulse"
                         title="Stop queue execution"
                     >
                         <VscDebugStop size={14} />

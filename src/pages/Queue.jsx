@@ -63,6 +63,35 @@ export default function Queue() {
     useEffect(() => {
         fetch();
         fetchCommands();
+
+        // Listen for execution events
+        const cleanupStarted = window.api.onQueueExecutionStarted?.((data) => {
+            console.log("Execution started:", data);
+            setIsExecuting(true);
+        });
+
+        const cleanupCompleted = window.api.onQueueExecutionCompleted?.((result) => {
+            console.log("Execution completed:", result);
+            setIsExecuting(false);
+            fetch();
+        });
+
+        const cleanupStopped = window.api.onQueueItemStopped?.((item) => {
+            console.log("Item stopped:", item);
+            setStopped(item.id);
+            fetch();
+        });
+
+        const cleanupStopping = window.api.onQueueStopping?.(() => {
+            setIsExecuting(false);
+        });
+
+        return () => {
+            cleanupStarted?.();
+            cleanupCompleted?.();
+            cleanupStopped?.();
+            cleanupStopping?.();
+        };
     }, []);
 
     // Reset form
@@ -123,8 +152,9 @@ export default function Queue() {
     // Execute single command now
     const executeNow = async (item) => {
         try {
-            // If item doesn't have an ID, add it to queue first
             let queueItem = item;
+
+            // If new item without ID, add to queue first
             if (!item.id) {
                 queueItem = await add(item);
             }
@@ -133,17 +163,11 @@ export default function Queue() {
             setRunning(queueItem.id);
             await updateStatus(queueItem.id, "running");
 
-            // Listen for command output (optional)
-            const cleanupOutput = window.api.onCommandOutput?.(queueItem.id, (data) => {
-                console.log("Command output:", data.substring(0, 100));
-            });
-
             // Listen for completion
-            const cleanupComplete = window.api.onCommandComplete?.(queueItem.id, async (result) => {
+            const cleanupComplete = window.api.onCommandComplete(queueItem.id, async (result) => {
                 console.log("Command completed:", result);
 
-                // Update status based on result
-                if (result.status === "completed" || result.exitCode === 0) {
+                if (result.status === "completed") {
                     setCompleted(queueItem.id);
                     await updateStatus(queueItem.id, "completed");
                 } else {
@@ -151,17 +175,9 @@ export default function Queue() {
                     await updateStatus(queueItem.id, "failed");
                 }
 
-                // Clean up listeners
-                cleanupOutput?.();
-                cleanupComplete?.();
-
-                // Refresh data
+                cleanupComplete();
                 await fetch();
-
-                // Trigger history refresh
-                if (window.api.onHistoryUpdated) {
-                    window.api.onHistoryUpdated();
-                }
+                window.api.onHistoryUpdated?.();
             });
 
             // Execute the command
@@ -485,7 +501,8 @@ export default function Queue() {
                         <option value="">Choose a saved command...</option>
                         {managedCommands.map((c) => (
                             <option key={c.id} value={c.id}>
-                                [{c.group_name}] {c.command.substring(0, 50)}
+                                {c.title || c.command.substring(0, 40)}
+                                {c.group_name !== "All Commands" ? ` [${c.group_name}]` : ""}
                             </option>
                         ))}
                     </select>

@@ -32,12 +32,21 @@ function initDatabase() {
         )`);
                 db.run(`CREATE TABLE IF NOT EXISTS commands (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
+          title TEXT,
           group_name TEXT DEFAULT 'All Commands',
           header TEXT,
           command TEXT NOT NULL,
           footer TEXT,
           timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )`);
+
+                db.run(`ALTER TABLE commands ADD COLUMN title TEXT`, (err) => {
+                    // Ignore error if column already exists
+                    if (err && !err.message.includes("duplicate column")) {
+                        console.warn("Error adding title column:", err.message);
+                    }
+                });
+
                 db.run(`CREATE TABLE IF NOT EXISTS startup (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           dir TEXT NOT NULL DEFAULT '~',

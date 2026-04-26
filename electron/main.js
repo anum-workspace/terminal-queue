@@ -4,13 +4,14 @@ const { setQuitting } = require("./appState");
 const { initDatabase } = require("./database");
 const { createTray } = require("./tray");
 const { setupAutoLaunch } = require("./autoLauncher");
-const { registerQueueHandlers } = require("./ipc/queue");
-const { registerHistoryHandlers } = require("./ipc/history.js");
-const { registerCommandsHandlers } = require("./ipc/commands.js");
+
+// Import handlers
+const { registerQueueHandlers, setTerminals } = require("./ipc/queue");
+const { registerHistoryHandlers } = require("./ipc/history");
+const { registerCommandsHandlers } = require("./ipc/commands");
 const { registerStartupHandlers } = require("./ipc/startup");
-const { registerTerminalHandlers } = require("./ipc/terminal");
+const { registerTerminalHandlers, getTerminals } = require("./ipc/terminal");
 const { registerWindowHandlers } = require("./ipc/window");
-const { registerSystemHandlers } = require("./ipc/system");
 const { registerDialogHandlers } = require("./ipc/dialog");
 
 let mainWindow = null;
@@ -20,17 +21,21 @@ function createWindow() {
     mainWindow = new BrowserWindow({
         width: 1200,
         height: 800,
-        frame: false, // Custom titlebar
+        minWidth: 800,
+        minHeight: 600,
+        frame: false,
         titleBarStyle: "hidden",
+        title: "TerminalQueue",
         webPreferences: {
             preload: path.join(__dirname, "preload.js"),
             nodeIntegration: false,
             contextIsolation: true,
         },
         icon: path.join(__dirname, "../assets/icon.png"),
+        backgroundColor: "#030712",
+        show: false,
     });
 
-    // Load Vite dev server or built files
     if (!app.isPackaged) {
         mainWindow.loadURL("http://localhost:5173");
         mainWindow.webContents.openDevTools();
@@ -39,50 +44,92 @@ function createWindow() {
         mainWindow.loadFile(path.join(__dirname, "../dist/index.html"));
     }
 
+    mainWindow.once("ready-to-show", () => {
+        mainWindow.show();
+    });
+
     mainWindow.on("close", (e) => {
         if (!require("./appState").getQuitting()) {
             e.preventDefault();
-            mainWindow.hide(); // Minimize to tray
+            mainWindow.hide();
         }
     });
 }
 
 app.whenReady().then(async () => {
-    await initDatabase(); // Create tables
+    // Initialize database FIRST
+    await initDatabase();
+    console.log("Database initialized");
+
+    // Setup auto launch
     setupAutoLaunch();
+
+    // Create window
     createWindow();
+
+    // Create tray
     tray = createTray(mainWindow);
 
-    // Register all IPC handlers
-    registerQueueHandlers(mainWindow);
-    registerHistoryHandlers();
-    registerCommandsHandlers();
-    registerStartupHandlers();
-    registerTerminalHandlers(mainWindow);
+    // Register ALL IPC handlers - ORDER MATTERS
+    console.log("Registering IPC handlers...");
+
     registerWindowHandlers(mainWindow);
-    registerSystemHandlers();
+    console.log("✓ Window handlers registered");
+
     registerDialogHandlers(mainWindow);
-    // Global shortcut to show window (optional)
+    console.log("✓ Dialog handlers registered");
+
+    registerTerminalHandlers(mainWindow);
+    console.log("✓ Terminal handlers registered");
+
+    // Share terminals Map with queue handler BEFORE registering queue handlers
+    setTerminals(getTerminals());
+
+    registerQueueHandlers(mainWindow);
+    console.log("✓ Queue handlers registered");
+
+    registerHistoryHandlers();
+    console.log("✓ History handlers registered");
+
+    registerCommandsHandlers();
+    console.log("✓ Commands handlers registered");
+
+    registerStartupHandlers();
+    console.log("✓ Startup handlers registered");
+
+    console.log("All IPC handlers registered successfully");
+
+    // Global shortcut
     globalShortcut.register("CmdOrCtrl+Shift+T", () => {
         if (mainWindow) {
-            mainWindow.show();
-            mainWindow.focus();
+            if (mainWindow.isVisible()) {
+                mainWindow.hide();
+            } else {
+                mainWindow.show();
+                mainWindow.focus();
+            }
         }
     });
 });
 
 app.on("window-all-closed", () => {
-    if (process.platform !== "darwin") app.quit();
+    if (process.platform !== "darwin") {
+        app.quit();
+    }
+});
+
+app.on("activate", () => {
+    if (BrowserWindow.getAllWindows().length === 0) {
+        createWindow();
+    } else if (mainWindow) {
+        mainWindow.show();
+    }
 });
 
 app.on("before-quit", () => {
     setQuitting(true);
 });
 
-process.on("uncaughtException", (error) => {
-    console.error("Uncaught Exception:", error);
-});
-
-process.on("unhandledRejection", (reason, promise) => {
-    console.error("Unhandled Rejection at:", promise, "reason:", reason);
+app.on("will-quit", () => {
+    globalShortcut.unregisterAll();
 });

@@ -192,7 +192,7 @@ export default function History() {
             </div>
 
             {/* History List */}
-            <div className="flex-1 overflow-y-auto p-2 space-y-2">
+            <div className="flex-1 h-full overflow-y-auto p-2 space-y-2 pb-10">
                 {filteredItems.length === 0 ? (
                     <div className="flex items-center justify-center h-32 text-gray-500 text-sm">
                         No history items found
@@ -291,7 +291,7 @@ export default function History() {
                                         <div className="text-xs text-gray-500 font-medium">
                                             Command:
                                         </div>
-                                        <div className="bg-gray-950/50 rounded p-2 font-mono text-xs text-gray-300 max-h-12 overflow-y-auto">
+                                        <div className="bg-gray-950/50 rounded p-2 font-mono text-xs text-gray-300 min-h-12">
                                             {(item.header ? item.header + "\n" : "") +
                                                 item.command +
                                                 (item.footer ? "\n" + item.footer : "")}
@@ -303,7 +303,7 @@ export default function History() {
                                         <div className="text-xs text-gray-500 font-medium">
                                             Log (last 3 lines):
                                         </div>
-                                        <div className="bg-gray-950/50 rounded p-2 font-mono text-xs text-gray-400 max-h-20 overflow-y-auto whitespace-pre-wrap">
+                                        <div className="bg-gray-950/50 rounded p-2 font-mono text-xs text-gray-400 min-h-20 whitespace-pre-wrap">
                                             {item.log || "No output available"}
                                         </div>
                                     </div>

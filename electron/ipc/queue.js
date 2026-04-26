@@ -2,19 +2,29 @@ const { ipcMain } = require("electron");
 const { getDb } = require("../database");
 const os = require("os");
 const path = require("path");
+const fs = require("fs");
 
-// Helper function to execute a single command
-function executeSingleCommand(queueItem, mainWindow) {
+// Terminals reference (will be set by main.js)
+let terminals = new Map();
+
+// Store the stop state at module level so it persists across IPC calls
+let stopRequested = false;
+let currentExecutionMainWindow = null;
+
+function setTerminals(termMap) {
+    terminals = termMap;
+}
+
+// Execute a single command silently
+function executeSingleCommand(queueItem, mainWindow, stopCheck) {
     return new Promise((resolve, reject) => {
         const { id, dir, header, command, footer } = queueItem;
         const homeDir = os.homedir();
         const workingDir = dir && dir !== "~" ? dir.replace(/^~/, homeDir) : homeDir;
 
-        const fs = require("fs");
         let finalCwd = workingDir;
         try {
             if (!fs.existsSync(finalCwd)) {
-                console.warn(`Directory ${finalCwd} does not exist, using ${homeDir}`);
                 finalCwd = homeDir;
             }
         } catch (err) {
@@ -40,45 +50,88 @@ function executeSingleCommand(queueItem, mainWindow) {
         let isCompleted = false;
         let timeout;
 
-        // Set a reasonable timeout (5 minutes)
+        // Store the PTY process reference for stopping
+        const execTermId = `exec-${id}`;
+        if (typeof terminals !== "undefined" && terminals) {
+            terminals.set(execTermId, {
+                pty: ptyProcess,
+                process: ptyProcess.pid,
+                cwd: finalCwd,
+                isExecution: true,
+            });
+        }
+
+        // Set timeout (10 minutes)
         timeout = setTimeout(() => {
             if (!isCompleted) {
                 isCompleted = true;
-                console.log(`Command ${id} timed out, killing process`);
                 try {
                     require("tree-kill")(ptyProcess.pid, "SIGTERM");
                 } catch (err) {
-                    console.error("Error killing timed out process:", err);
+                    console.error("Error killing process:", err);
                 }
                 resolve({
                     exitCode: -1,
-                    output: output + "\n\x1b[31m[Command timed out after 5 minutes]\x1b[0m",
+                    output: output + "\n[Command timed out after 10 minutes]",
                     error: "Command timed out",
                 });
             }
-        }, 300000); // 5 minutes
+        }, 600000);
+
+        // Check for stop signal periodically
+        const stopInterval = setInterval(() => {
+            if (stopCheck && stopCheck()) {
+                console.log(`Stop requested for command ${id}, killing process`);
+                clearInterval(stopInterval);
+                if (!isCompleted) {
+                    isCompleted = true;
+                    clearTimeout(timeout);
+                    try {
+                        require("tree-kill")(ptyProcess.pid, "SIGTERM");
+                    } catch (err) {
+                        console.error("Error killing stopped process:", err);
+                    }
+                    resolve({
+                        exitCode: -1,
+                        output: output + "\n[Stopped by user]",
+                        error: "Stopped by user",
+                    });
+                }
+            }
+        }, 500); // Check every 500ms
 
         ptyProcess.onData((data) => {
             output += data;
 
-            // Send output to renderer
             try {
                 if (mainWindow && !mainWindow.isDestroyed()) {
+                    // Send to user terminal tabs
+                    if (terminals && terminals.size > 0) {
+                        terminals.forEach((term, tabId) => {
+                            if (term && term.pty && !term.isExecution) {
+                                mainWindow.webContents.send(`terminal:data-${tabId}`, data);
+                            }
+                        });
+                    }
+
+                    // Send to command output channel
                     mainWindow.webContents.send(`command:output-${id}`, data);
                 }
             } catch (err) {
-                console.error("Error sending command output:", err);
+                console.error("Error sending output:", err);
             }
         });
 
-        ptyProcess.onExit(({ exitCode, signal }) => {
+        ptyProcess.onExit(({ exitCode }) => {
             if (!isCompleted) {
                 isCompleted = true;
                 clearTimeout(timeout);
+                clearInterval(stopInterval);
 
-                console.log(
-                    `Command ${id} completed with exit code: ${exitCode}, signal: ${signal}`,
-                );
+                // Clean up terminals map
+                if (typeof terminals !== "undefined" && terminals) {
+                    terminals.delete(execTermId);
+                }
 
                 resolve({
                     exitCode: exitCode || 0,
@@ -88,51 +141,28 @@ function executeSingleCommand(queueItem, mainWindow) {
             }
         });
 
-        // Build the command with proper exit detection
+        // Build command silently
         let fullCommand = "";
+        fullCommand += `cd "${finalCwd}" 2>/dev/null\n`;
 
-        // Change to working directory
-        if (shell.includes("bash") || shell.includes("zsh") || shell.includes("sh")) {
-            fullCommand += `cd "${finalCwd}" 2>/dev/null || true\n`;
-        } else {
-            fullCommand += `cd "${finalCwd}"\n`;
-        }
-
-        // Echo start marker
-        fullCommand += `echo "\\x1b[36m═══ Command Started ═══\\x1b[0m"\n`;
-
-        // Execute header if exists
         if (header && header.trim()) {
-            fullCommand += `echo "\\x1b[33m[Header] ${header.replace(/"/g, '\\"')}\\x1b[0m"\n`;
             fullCommand += `${header}\n`;
-            fullCommand += `echo "\\x1b[32m✓ Header completed with code: $?\\x1b[0m"\n`;
         }
 
-        // Execute main command
-        fullCommand += `echo "\\x1b[36m[Command] ${command.replace(/"/g, '\\"')}\\x1b[0m"\n`;
         fullCommand += `${command}\n`;
-        fullCommand += `COMMAND_EXIT=$?\n`;
+        const cmdExit = "$?";
 
-        // Execute footer if exists
         if (footer && footer.trim()) {
-            fullCommand += `echo "\\x1b[33m[Footer] ${footer.replace(/"/g, '\\"')}\\x1b[0m"\n`;
             fullCommand += `${footer}\n`;
-            fullCommand += `FOOTER_EXIT=$?\n`;
         }
 
-        // Echo completion with exit code
-        fullCommand += `echo ""\n`;
-        fullCommand += `echo "\\x1b[32m═══ Command Completed (Exit: $COMMAND_EXIT) ═══\\x1b[0m"\n`;
+        fullCommand += `exit ${cmdExit}\n`;
 
-        // Exit the shell to signal completion
-        fullCommand += `exit $COMMAND_EXIT\n`;
-
-        // Write the command
         ptyProcess.write(fullCommand);
     });
 }
 
-// Helper function to save execution to history
+// Save execution to history
 function saveToHistory(queueItem, result, status) {
     return new Promise((resolve, reject) => {
         const { dir, header, command, footer } = queueItem;
@@ -154,6 +184,7 @@ function saveToHistory(queueItem, result, status) {
                     console.error("Error saving to history:", err);
                     reject(err);
                 } else {
+                    console.log(`Saved to history with ID: ${this.lastID}`);
                     resolve({ id: this.lastID });
                 }
             },
@@ -162,6 +193,8 @@ function saveToHistory(queueItem, result, status) {
 }
 
 function registerQueueHandlers(mainWindow) {
+    // ==================== BASIC CRUD OPERATIONS ====================
+
     // Get all queue items
     ipcMain.handle("queue:getAll", () => {
         return new Promise((resolve, reject) => {
@@ -170,10 +203,10 @@ function registerQueueHandlers(mainWindow) {
                     console.error("Error fetching queue:", err);
                     reject(err);
                 } else {
-                    // Resolve ~ to actual home directory for display
+                    const homeDir = os.homedir();
                     const resolved = rows.map((row) => ({
                         ...row,
-                        dir: row.dir === "~" ? os.homedir() : row.dir.replace(/^~/, os.homedir()),
+                        dir: row.dir === "~" ? homeDir : row.dir,
                     }));
                     resolve(resolved);
                 }
@@ -181,7 +214,7 @@ function registerQueueHandlers(mainWindow) {
         });
     });
 
-    // Get single queue item
+    // Get single queue item by ID
     ipcMain.handle("queue:getById", (event, id) => {
         return new Promise((resolve, reject) => {
             getDb().get("SELECT * FROM queue WHERE id = ?", [id], (err, row) => {
@@ -202,13 +235,11 @@ function registerQueueHandlers(mainWindow) {
         return new Promise((resolve, reject) => {
             const { dir, header, command, footer } = item;
 
-            // Validate command
             if (!command || command.trim() === "") {
                 reject(new Error("Command is required"));
                 return;
             }
 
-            // Get current max order_position
             getDb().get("SELECT MAX(order_position) as maxOrder FROM queue", (err, row) => {
                 if (err) {
                     console.error("Error getting max order:", err);
@@ -217,13 +248,12 @@ function registerQueueHandlers(mainWindow) {
                 }
 
                 const nextOrder = (row.maxOrder || -1) + 1;
-
-                // Normalize directory
+                const homeDir = os.homedir();
                 let normalizedDir = dir || "~";
                 if (normalizedDir === "~") {
-                    normalizedDir = os.homedir();
+                    normalizedDir = homeDir;
                 } else {
-                    normalizedDir = normalizedDir.replace(/^~/, os.homedir());
+                    normalizedDir = normalizedDir.replace(/^~/, homeDir);
                 }
 
                 getDb().run(
@@ -269,9 +299,9 @@ function registerQueueHandlers(mainWindow) {
             for (const [key, value] of Object.entries(updates)) {
                 if (allowedFields.includes(key)) {
                     setClauses.push(`${key} = ?`);
-                    // Normalize directory if it's being updated
                     if (key === "dir" && value) {
-                        params.push(value.replace(/^~/, os.homedir()));
+                        const homeDir = os.homedir();
+                        params.push(value.replace(/^~/, homeDir));
                     } else {
                         params.push(value);
                     }
@@ -378,10 +408,9 @@ function registerQueueHandlers(mainWindow) {
         });
     });
 
-    // Move queue item up or down
+    // Move item up/down
     ipcMain.handle("queue:moveItem", (event, id, direction) => {
         return new Promise((resolve, reject) => {
-            // Get current item
             getDb().get("SELECT * FROM queue WHERE id = ?", [id], (err, currentItem) => {
                 if (err || !currentItem) {
                     reject(new Error("Queue item not found"));
@@ -391,7 +420,6 @@ function registerQueueHandlers(mainWindow) {
                 const currentOrder = currentItem.order_position;
                 const targetOrder = direction === "up" ? currentOrder - 1 : currentOrder + 1;
 
-                // Get item to swap with
                 getDb().get(
                     "SELECT * FROM queue WHERE order_position = ?",
                     [targetOrder],
@@ -401,7 +429,6 @@ function registerQueueHandlers(mainWindow) {
                             return;
                         }
 
-                        // Swap order positions
                         getDb().run(
                             "UPDATE queue SET order_position = ? WHERE id = ?",
                             [targetOrder, currentItem.id],
@@ -429,10 +456,17 @@ function registerQueueHandlers(mainWindow) {
         });
     });
 
-    // Update queue item status
+    // Update status
     ipcMain.handle("queue:updateStatus", (event, id, status) => {
         return new Promise((resolve, reject) => {
-            const validStatuses = ["pending", "running", "completed", "failed", "stopped"];
+            const validStatuses = [
+                "pending",
+                "running",
+                "completed",
+                "failed",
+                "stopped",
+                "queued",
+            ];
 
             if (!validStatuses.includes(status)) {
                 reject(new Error(`Invalid status: ${status}`));
@@ -456,7 +490,7 @@ function registerQueueHandlers(mainWindow) {
         });
     });
 
-    // Get queue statistics
+    // Get queue stats
     ipcMain.handle("queue:getStats", () => {
         return new Promise((resolve, reject) => {
             getDb().get(
@@ -473,7 +507,16 @@ function registerQueueHandlers(mainWindow) {
                         console.error("Error getting queue stats:", err);
                         reject(err);
                     } else {
-                        resolve(stats);
+                        resolve(
+                            stats || {
+                                total: 0,
+                                pending: 0,
+                                running: 0,
+                                completed: 0,
+                                failed: 0,
+                                stopped: 0,
+                            },
+                        );
                     }
                 },
             );
@@ -522,22 +565,26 @@ function registerQueueHandlers(mainWindow) {
         });
     });
 
-    // Run entire queue (called from Navbar)
+    // ==================== EXECUTION OPERATIONS ====================
+
+    // Run all queue items
     ipcMain.handle("queue:runAll", async (event) => {
         return new Promise(async (resolve, reject) => {
             try {
+                // Reset stop flag at start
+                stopRequested = false;
+                currentExecutionMainWindow = mainWindow;
+
                 // Get all pending queue items
                 const queueItems = await new Promise((res, rej) => {
                     getDb().all(
                         "SELECT * FROM queue WHERE status IN ('pending', 'queued') ORDER BY order_position ASC",
                         (err, rows) => {
                             if (err) rej(err);
-                            else res(rows);
+                            else res(rows || []);
                         },
                     );
                 });
-
-                console.log(`Found ${queueItems.length} items to execute`);
 
                 if (queueItems.length === 0) {
                     resolve({
@@ -548,7 +595,9 @@ function registerQueueHandlers(mainWindow) {
                     return;
                 }
 
-                // Notify renderer that execution started
+                console.log(`Starting queue execution: ${queueItems.length} items`);
+
+                // Notify renderer
                 if (mainWindow && !mainWindow.isDestroyed()) {
                     mainWindow.webContents.send("queue:execution-started", {
                         total: queueItems.length,
@@ -558,26 +607,30 @@ function registerQueueHandlers(mainWindow) {
 
                 let executed = 0;
                 let failed = 0;
-                let stopped = false;
-
-                // Listen for stop signal
-                const stopHandler = () => {
-                    stopped = true;
-                };
-
-                if (mainWindow) {
-                    ipcMain.once("queue:stop-execution", stopHandler);
-                }
+                let stoppedCount = 0;
 
                 // Execute commands sequentially
                 for (let i = 0; i < queueItems.length; i++) {
-                    if (stopped) {
-                        console.log("Queue execution stopped by user");
-                        // Update remaining items
+                    // CHECK STOP FLAG BEFORE EACH COMMAND
+                    if (stopRequested) {
+                        console.log(
+                            `Queue execution stopped by user at item ${i + 1}/${queueItems.length}`,
+                        );
+
+                        // Mark remaining items as stopped
                         for (let j = i; j < queueItems.length; j++) {
-                            getDb().run("UPDATE queue SET status = 'stopped' WHERE id = ?", [
-                                queueItems[j].id,
-                            ]);
+                            try {
+                                await new Promise((res, rej) => {
+                                    getDb().run(
+                                        "UPDATE queue SET status = 'stopped' WHERE id = ?",
+                                        [queueItems[j].id],
+                                        (err) => (err ? rej(err) : res()),
+                                    );
+                                });
+                                stoppedCount++;
+                            } catch (err) {
+                                console.error("Error updating stopped status:", err);
+                            }
                         }
                         break;
                     }
@@ -585,38 +638,96 @@ function registerQueueHandlers(mainWindow) {
                     const item = queueItems[i];
 
                     try {
-                        console.log(`Executing queue item ${item.id}: ${item.command}`);
+                        console.log(
+                            `Executing command ${i + 1}/${queueItems.length}: ${item.command.substring(0, 50)}...`,
+                        );
 
-                        // Update status to running
-                        getDb().run("UPDATE queue SET status = 'running' WHERE id = ?", [item.id]);
+                        // Update to running
+                        await new Promise((res, rej) => {
+                            getDb().run(
+                                "UPDATE queue SET status = 'running' WHERE id = ?",
+                                [item.id],
+                                (err) => (err ? rej(err) : res()),
+                            );
+                        });
 
                         if (mainWindow && !mainWindow.isDestroyed()) {
                             mainWindow.webContents.send("queue:item-running", {
                                 ...item,
                                 status: "running",
+                                index: i,
                             });
                         }
 
-                        // Execute command and wait for completion
-                        const result = await executeSingleCommand(item, mainWindow);
-
-                        console.log(
-                            `Queue item ${item.id} completed with exit code: ${result.exitCode}`,
+                        // Execute command - this will throw if stopped during execution
+                        const result = await executeSingleCommand(
+                            item,
+                            mainWindow,
+                            () => stopRequested,
                         );
 
-                        // Determine status based on exit code
+                        // Check if stopped during execution
+                        if (stopRequested) {
+                            const status = "stopped";
+                            await new Promise((res, rej) => {
+                                getDb().run(
+                                    "UPDATE queue SET status = ? WHERE id = ?",
+                                    [status, item.id],
+                                    (err) => (err ? rej(err) : res()),
+                                );
+                            });
+
+                            // Save partial output to history
+                            try {
+                                await saveToHistory(
+                                    item,
+                                    { exitCode: -1, output: result.output || "Stopped by user" },
+                                    status,
+                                );
+                            } catch (e) {
+                                console.error("Error saving stopped to history:", e);
+                            }
+
+                            if (mainWindow && !mainWindow.isDestroyed()) {
+                                mainWindow.webContents.send("queue:item-stopped", {
+                                    ...item,
+                                    status,
+                                });
+                            }
+
+                            stoppedCount++;
+
+                            // Mark remaining as stopped
+                            for (let j = i + 1; j < queueItems.length; j++) {
+                                try {
+                                    await new Promise((res, rej) => {
+                                        getDb().run(
+                                            "UPDATE queue SET status = 'stopped' WHERE id = ?",
+                                            [queueItems[j].id],
+                                            (err) => (err ? rej(err) : res()),
+                                        );
+                                    });
+                                    stoppedCount++;
+                                } catch (err) {
+                                    console.error("Error updating stopped status:", err);
+                                }
+                            }
+                            break;
+                        }
+
                         const status = result.exitCode === 0 ? "completed" : "failed";
 
                         // Update queue status
-                        getDb().run("UPDATE queue SET status = ? WHERE id = ?", [status, item.id]);
+                        await new Promise((res, rej) => {
+                            getDb().run(
+                                "UPDATE queue SET status = ? WHERE id = ?",
+                                [status, item.id],
+                                (err) => (err ? rej(err) : res()),
+                            );
+                        });
 
                         // Save to history
-                        try {
-                            await saveToHistory(item, result, status);
-                            console.log(`Saved to history: ${item.id}`);
-                        } catch (historyErr) {
-                            console.error("Error saving to history:", historyErr);
-                        }
+                        await saveToHistory(item, result, status);
 
                         if (status === "completed") {
                             executed++;
@@ -625,7 +736,7 @@ function registerQueueHandlers(mainWindow) {
                                     ...item,
                                     status,
                                     exitCode: result.exitCode,
-                                    output: result.output?.substring(0, 1000),
+                                    index: i,
                                 });
                             }
                         } else {
@@ -635,29 +746,36 @@ function registerQueueHandlers(mainWindow) {
                                     ...item,
                                     status,
                                     exitCode: result.exitCode,
-                                    error: result.error || `Exit code: ${result.exitCode}`,
+                                    error: result.error,
+                                    index: i,
                                 });
                             }
                         }
 
-                        // Small delay between commands
-                        await new Promise((resolve) => setTimeout(resolve, 500));
+                        // Small delay between commands (but check stop flag)
+                        if (!stopRequested) {
+                            await new Promise((resolve) => setTimeout(resolve, 500));
+                        }
                     } catch (error) {
                         console.error(`Error executing queue item ${item.id}:`, error);
                         failed++;
 
-                        // Update status to failed
-                        getDb().run("UPDATE queue SET status = 'failed' WHERE id = ?", [item.id]);
+                        await new Promise((res, rej) => {
+                            getDb().run(
+                                "UPDATE queue SET status = 'failed' WHERE id = ?",
+                                [item.id],
+                                (err) => (err ? rej(err) : res()),
+                            );
+                        });
 
-                        // Save failed attempt to history
                         try {
                             await saveToHistory(
                                 item,
                                 { exitCode: -1, output: error.message },
                                 "failed",
                             );
-                        } catch (historyErr) {
-                            console.error("Error saving failed to history:", historyErr);
+                        } catch (e) {
+                            console.error("Error saving failed to history:", e);
                         }
 
                         if (mainWindow && !mainWindow.isDestroyed()) {
@@ -665,46 +783,95 @@ function registerQueueHandlers(mainWindow) {
                                 ...item,
                                 status: "failed",
                                 error: error.message,
+                                index: i,
                             });
                         }
                     }
                 }
 
-                // Clean up stop listener
-                if (mainWindow) {
-                    ipcMain.removeListener("queue:stop-execution", stopHandler);
-                }
+                // Reset stop flag
+                stopRequested = false;
+                currentExecutionMainWindow = null;
 
-                // Notify completion
                 const result = {
                     success: true,
                     total: queueItems.length,
                     executed,
                     failed,
-                    stopped,
+                    stopped: stoppedCount,
+                    wasStopped: executed + failed < queueItems.length,
                 };
 
                 console.log("Queue execution completed:", result);
 
                 if (mainWindow && !mainWindow.isDestroyed()) {
                     mainWindow.webContents.send("queue:execution-completed", result);
-                    // Also trigger history refresh
                     mainWindow.webContents.send("history:updated");
                 }
 
                 resolve(result);
             } catch (error) {
                 console.error("Error executing queue:", error);
+                stopRequested = false;
+                currentExecutionMainWindow = null;
                 reject(error);
             }
         });
     });
 
+    // Execute single command (for Execute Now)
+    ipcMain.handle("queue:executeSingle", async (event, queueItem) => {
+        try {
+            getDb().run("UPDATE queue SET status = 'running' WHERE id = ?", [queueItem.id]);
+
+            if (mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.send("queue:item-running", {
+                    ...queueItem,
+                    status: "running",
+                });
+            }
+
+            const result = await executeSingleCommand(queueItem, mainWindow);
+            const status = result.exitCode === 0 ? "completed" : "failed";
+
+            getDb().run("UPDATE queue SET status = ? WHERE id = ?", [status, queueItem.id]);
+            await saveToHistory(queueItem, result, status);
+
+            if (mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.send(`command:complete-${queueItem.id}`, {
+                    exitCode: result.exitCode,
+                    status,
+                    output: result.output?.substring(0, 5000),
+                });
+                mainWindow.webContents.send("history:updated");
+            }
+
+            return { success: true, exitCode: result.exitCode, status };
+        } catch (error) {
+            console.error("Error executing single command:", error);
+            throw error;
+        }
+    });
+
     // Stop queue execution
-    ipcMain.handle("queue:stopExecution", () => {
-        // This will be caught by the runAll handler
+    ipcMain.handle("queue:stopExecution", (event) => {
+        stopRequested = true;
+        console.log("Stop signal received for queue execution");
+
+        // Also emit to any running commands to stop
+        if (currentExecutionMainWindow && !currentExecutionMainWindow.isDestroyed()) {
+            currentExecutionMainWindow.webContents.send("queue:stopping");
+        }
+
         return { success: true, message: "Stop signal sent" };
     });
+
+    // Check if stop was requested
+    ipcMain.handle("queue:isStopping", () => {
+        return { stopping: stopRequested };
+    });
+
+    console.log("Queue IPC handlers registered successfully");
 }
 
-module.exports = { registerQueueHandlers };
+module.exports = { registerQueueHandlers, setTerminals };
